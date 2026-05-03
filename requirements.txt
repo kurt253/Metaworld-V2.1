@@ -1,0 +1,20 @@
+# metaworldV2 — Python-afhankelijkheden
+# Installeren: pip install -r requirements.txt
+# Vereist Python 3.9+
+
+# --- Data ---
+pandas>=2.0
+
+# --- Web-diensten ---
+flask>=3.0
+PyJWT>=2.8
+
+# --- Dashboard ---
+streamlit>=1.35
+plotly>=5.20
+
+# --- Notebooks ---
+jupyter>=1.0
+ipykernel>=6.0
+matplotlib>=3.8
+openpyxl>=3.1
