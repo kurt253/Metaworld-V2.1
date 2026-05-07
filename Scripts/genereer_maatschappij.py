@@ -22,7 +22,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from generate_register  import generate_rijksregister, generate_bisregister
-from generate_families  import generate_families, pas_familienamen_aan
+from generate_families  import generate_families
+from generate_careers   import generate_careers
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -125,25 +126,39 @@ def main() -> None:
     )
     _ok("Families", len(families), time.time() - t)
 
-    # ── Familienamen terugschrijven naar registers ────────────────────────────
-    pas_familienamen_aan(families, rr_df, bis_df)
+    # ── Stap 4: Loopbanen genereren ──────────────────────────────────────────
+    _stap(4, "Loopbanen genereren (Dimona / RSVZ / RVW)")
+    t = time.time()
+    dimona, rsvz, rvw = generate_careers(
+        rr_df=rr_df,
+        bis_df=bis_df,
+        config_path=config_path,
+    )
+    _ok("Dimona", len(dimona), time.time() - t)
+    _ok("RSVZ",   len(rsvz),   0)
+    _ok("RVW",    len(rvw),    0)
 
-    # ── Stap 4: Opslaan ──────────────────────────────────────────────────────
-    _stap(4, "Opslaan naar Generated Data/")
+    # ── Stap 5: Opslaan ──────────────────────────────────────────────────────
+    _stap(5, "Opslaan naar Generated Data/")
     t = time.time()
 
-    rr_pad  = save_dir / f"{prefix}_rijksregister.json"
-    bis_pad = save_dir / f"{prefix}_bisregister.json"
-    fam_pad = save_dir / f"{prefix}_families.json"
+    rr_pad     = save_dir / f"{prefix}_rijksregister.json"
+    bis_pad    = save_dir / f"{prefix}_bisregister.json"
+    fam_pad    = save_dir / f"{prefix}_families.json"
+    dimona_pad = save_dir / f"{prefix}_dimona.json"
+    rsvz_pad   = save_dir / f"{prefix}_rsvz.json"
+    rvw_pad    = save_dir / f"{prefix}_rvw.json"
 
     rr_df.to_json(rr_pad,   orient="records", force_ascii=False, indent=2)
     bis_df.to_json(bis_pad, orient="records", force_ascii=False, indent=2)
     with open(fam_pad, "w", encoding="utf-8") as f:
         json.dump(families, f, ensure_ascii=False, indent=2, default=str)
+    for pad, data in [(dimona_pad, dimona), (rsvz_pad, rsvz), (rvw_pad, rvw)]:
+        with open(pad, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2, default=str)
 
-    print(f"  → {rr_pad.name}")
-    print(f"  → {bis_pad.name}")
-    print(f"  → {fam_pad.name}")
+    for pad in [rr_pad, bis_pad, fam_pad, dimona_pad, rsvz_pad, rvw_pad]:
+        print(f"  → {pad.name}")
     print(f"  Opgeslagen in {time.time() - t:.1f}s")
 
     # ── Rapport ──────────────────────────────────────────────────────────────

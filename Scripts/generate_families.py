@@ -4,7 +4,14 @@ Legt familierelaties tussen bestaande rijksregister- en bisregisterpersonen.
 
 Personen worden NIET opnieuw aangemaakt: naam, adres, geboortedatum enz.
 komen rechtstreeks uit de doorgegeven DataFrames.
-Wat wordt toegevoegd: generatie, partner_rr, vader_rr, moeder_rr, kinderen_rr.
+
+Wat wordt TOEGEVOEGD aan families.json:
+  rijksregisternummer, generatie, partner_rr, vader_rr, moeder_rr, kinderen_rr
+
+Wat wordt TERUGGESCHREVEN naar rr_df / bis_df (in-place):
+  burgerlijke_staat  – op basis van relatiestatus (gehuwd, gescheiden …)
+  familienaam        – kinderen erven de naam van de vader
+  adres_*            – koppels en minderjarigen delen het huishoudadres
 
 Generaties op basis van leeftijd (t.o.v. creation_date):
   0  – geboren ≤ ref_jaar − 70   (stamouders)
@@ -70,9 +77,11 @@ class FamilyGenerator:
         config_path=None,
         seed: int = 42,
     ):
-        cfg      = _load_config(config_path)
-        self.rng = random.Random(seed)
-        self.ref = date.fromisoformat(cfg["meta"]["creation_date"])
+        cfg          = _load_config(config_path)
+        self.rng     = random.Random(seed)
+        self.ref     = date.fromisoformat(cfg["meta"]["creation_date"])
+        self._rr_df  = rr_df
+        self._bis_df = bis_df
 
         # Generatiegrenswaarden (geboortejaar) op basis van referentiedatum
         ry = self.ref.year
@@ -90,10 +99,9 @@ class FamilyGenerator:
         # Personen die in het familiessysteem zitten: nummer → dict
         self._systeem: dict[str, dict] = {}
 
-        self._vul_pool(rr_df, nr_kolom="rijksregisternummer", exclude_gen0=False)
+        self._vul_pool(rr_df,  nr_kolom="rijksregisternummer", reg_type="RR",  exclude_gen0=False)
         if not bis_df.empty:
-            # BIS: enkel M/F, niet als gen-0 stamouder
-            self._vul_pool(bis_df, nr_kolom="bisnummer",
+            self._vul_pool(bis_df, nr_kolom="bisnummer",           reg_type="BIS",
                            exclude_gen0=True, only_mf=True)
 
         for gen_pools in self._pool.values():
@@ -114,6 +122,7 @@ class FamilyGenerator:
         self,
         df: pd.DataFrame,
         nr_kolom: str,
+        reg_type: str,
         exclude_gen0: bool = False,
         only_mf: bool = False,
     ) -> None:
@@ -135,34 +144,28 @@ class FamilyGenerator:
             if exclude_gen0 and gen == 0:
                 continue
             if geslacht not in ("M", "F"):
-                continue  # only use M/F for coupling
+                continue
 
             p: dict = {
                 "rijksregisternummer": nr,
-                "voornaam":          _clean(row.get("voornaam")),
-                "familienaam":       _clean(row.get("familienaam")),
-                "volledige_naam":    f"{_clean(row.get('voornaam')) or ''} "
-                                     f"{_clean(row.get('familienaam')) or ''}".strip(),
-                "geslacht":          geslacht,
-                "geboortedatum":     _clean(row.get("geboortedatum")),
-                "geboorteplaats":    _clean(row.get("geboorteplaats")),
-                "geboorteland":      _clean(row.get("geboorteland")),
-                "nationaliteit":     _clean(row.get("nationaliteit")),
-                "burgerlijke_staat": _clean(row.get("burgerlijke_staat")),
-                "overlijdensdatum":  _clean(row.get("overlijdensdatum")),
-                "adres_straat":      _clean(row.get("adres_straat")),
-                "adres_nr":          _clean(row.get("adres_nr")),
-                "adres_bus":         _clean(row.get("adres_bus")),
-                "adres_postcode":    _clean(row.get("adres_postcode")),
-                "adres_gemeente":    _clean(row.get("adres_gemeente")),
-                "adres_provincie":   _clean(row.get("adres_provincie")),
-                "adres_gewest":      _clean(row.get("adres_gewest")),
+                "_register":           reg_type,
+                "geslacht":            geslacht,
+                "geboortedatum":       _clean(row.get("geboortedatum")),
+                "familienaam":         _clean(row.get("familienaam")),
+                "burgerlijke_staat":   _clean(row.get("burgerlijke_staat")),
+                "adres_straat":        _clean(row.get("adres_straat")),
+                "adres_nr":            _clean(row.get("adres_nr")),
+                "adres_bus":           _clean(row.get("adres_bus")),
+                "adres_postcode":      _clean(row.get("adres_postcode")),
+                "adres_gemeente":      _clean(row.get("adres_gemeente")),
+                "adres_provincie":     _clean(row.get("adres_provincie")),
+                "adres_gewest":        _clean(row.get("adres_gewest")),
                 # Relatie-velden
-                "generatie":    gen,
-                "partner_rr":   None,
-                "vader_rr":     None,
-                "moeder_rr":    None,
-                "kinderen_rr":  [],
+                "generatie":   gen,
+                "partner_rr":  None,
+                "vader_rr":    None,
+                "moeder_rr":   None,
+                "kinderen_rr": [],
             }
             self._pool[gen][geslacht].append(p)
 
@@ -191,8 +194,8 @@ class FamilyGenerator:
         rel = self.rng.choices(
             ["gehuwd", "wettelijk_samenwonend"], weights=[0.70, 0.30]
         )[0]
-        man["partner_rr"]        = vrouw["rijksregisternummer"]
-        vrouw["partner_rr"]      = man["rijksregisternummer"]
+        man["partner_rr"]          = vrouw["rijksregisternummer"]
+        vrouw["partner_rr"]        = man["rijksregisternummer"]
         man["burgerlijke_staat"]   = rel
         vrouw["burgerlijke_staat"] = rel
 
@@ -215,8 +218,7 @@ class FamilyGenerator:
         kind["generatie"] = gen
         vader["kinderen_rr"].append(kind["rijksregisternummer"])
         moeder["kinderen_rr"].append(kind["rijksregisternummer"])
-        kind["familienaam"]    = vader["familienaam"]
-        kind["volledige_naam"] = f"{kind['voornaam'] or ''} {kind['familienaam'] or ''}".strip()
+        kind["familienaam"] = vader["familienaam"]
         return True
 
     # ── generaties opbouwen ──────────────────────────────────────────────────
@@ -317,7 +319,23 @@ class FamilyGenerator:
                 self._koppel(man, vrouw)
 
         self._pas_adressen_aan()
-        return list(self._systeem.values())
+        self._schrijf_terug()
+
+        # Slim resultaat gesorteerd gen 0 → 3 (dalende afstamming)
+        return sorted(
+            [
+                {
+                    "rijksregisternummer": p["rijksregisternummer"],
+                    "generatie":           p["generatie"],
+                    "partner_rr":          p["partner_rr"],
+                    "vader_rr":            p["vader_rr"],
+                    "moeder_rr":           p["moeder_rr"],
+                    "kinderen_rr":         p["kinderen_rr"],
+                }
+                for p in self._systeem.values()
+            ],
+            key=lambda p: p["generatie"],
+        )
 
     # ── adressen toewijzen op basis van gezinsstructuur ──────────────────────
 
@@ -348,7 +366,6 @@ class FamilyGenerator:
                     _kopieer(man, p)
 
         # Stap 2: kinderen < 18 krijgen het adres van de ouder
-        # (ouder-adres is al bijgewerkt in stap 1)
         for p in self._systeem.values():
             try:
                 leeftijd = (self.ref - date.fromisoformat(p["geboortedatum"])).days // 365
@@ -361,31 +378,44 @@ class FamilyGenerator:
                     if ouder:
                         _kopieer(ouder, p)
 
+    # ── terugschrijven naar registers ────────────────────────────────────────
+
+    def _schrijf_terug(self) -> None:
+        """
+        Schrijf gewijzigde velden (burgerlijke_staat, familienaam, adres_*)
+        terug naar de register-DataFrames (in-place).
+        """
+        _VELDEN = [
+            "burgerlijke_staat", "familienaam",
+            "adres_straat", "adres_nr", "adres_bus", "adres_postcode",
+            "adres_gemeente", "adres_provincie", "adres_gewest",
+        ]
+
+        for df, nr_kolom, reg_type in [
+            (self._rr_df,  "rijksregisternummer", "RR"),
+            (self._bis_df, "bisnummer",            "BIS"),
+        ]:
+            if df is None or df.empty or nr_kolom not in df.columns:
+                continue
+            personen = {
+                nr: p for nr, p in self._systeem.items()
+                if p.get("_register") == reg_type
+            }
+            if not personen:
+                continue
+            mask = df[nr_kolom].astype(str).isin(personen)
+            if not mask.any():
+                continue
+            nr_series = df.loc[mask, nr_kolom].astype(str)
+            for veld in _VELDEN:
+                df.loc[mask, veld] = nr_series.map(
+                    {nr: p.get(veld) for nr, p in personen.items()}
+                )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Publieke interface
 # ─────────────────────────────────────────────────────────────────────────────
-
-def pas_familienamen_aan(
-    families: list[dict],
-    rr_df: pd.DataFrame,
-    bis_df: Optional[pd.DataFrame] = None,
-) -> None:
-    """
-    Schrijft de familienamen uit de familiestructuur terug naar de register-DataFrames.
-    Werkt in-place. Roep aan na generate_families(), vóór het opslaan van de registers.
-    """
-    naam_map: dict[str, str] = {
-        str(p["rijksregisternummer"]): p["familienaam"]
-        for p in families
-        if p.get("rijksregisternummer") and p.get("familienaam")
-    }
-    for df, nr_col in [(rr_df, "rijksregisternummer"), (bis_df, "bisnummer")]:
-        if df is None or df.empty or nr_col not in df.columns:
-            continue
-        mask = df[nr_col].astype(str).isin(naam_map)
-        df.loc[mask, "familienaam"] = df.loc[mask, nr_col].astype(str).map(naam_map)
-
 
 def generate_families(
     n_stamfamilies: Optional[int] = None,
@@ -397,6 +427,9 @@ def generate_families(
 ) -> list[dict]:
     """
     Leg familierelaties tussen bestaande rijksregister- en bisregisterpersonen.
+
+    Wijzigingen aan burgerlijke_staat, familienaam en adres worden teruggeschreven
+    naar de doorgegeven DataFrames (in-place). Sla rr_df en bis_df daarna op.
 
     Parameters
     ----------
@@ -411,7 +444,8 @@ def generate_families(
 
     Returns
     -------
-    list[dict] – één dict per persoon in het familiessysteem
+    list[dict] – slim dict per persoon in het familiessysteem, gesorteerd gen 0→3:
+        {rijksregisternummer, generatie, partner_rr, vader_rr, moeder_rr, kinderen_rr}
     """
     cfg    = _load_config(config_path)
     counts = cfg["generation"]["counts"]

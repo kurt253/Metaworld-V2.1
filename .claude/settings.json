@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import sys; sys.path.insert\\(0,'Scripts'\\); from genereer_maatschappij import main; print\\('Import OK'\\)\")"
+    ]
+  }
+}

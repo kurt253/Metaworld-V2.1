@@ -94,22 +94,75 @@ def load_van_schijf(rr_pad: str, bis_pad: str, _rr_mtime: float, _bis_mtime: flo
 
 
 
-@st.cache_data(show_spinner="Families inlezen van schijf…")
-def load_families(fam_pad: str, _mtime: float) -> pd.DataFrame:
-    df = pd.read_json(fam_pad, convert_dates=False)
-    _verrijk_families(df)
-    return df
+def _enrich_families(fam: pd.DataFrame, rr: pd.DataFrame, bis: pd.DataFrame) -> pd.DataFrame:
+    """Verrijk slim families met persoonlijke data uit de registers via een join."""
+    if fam.empty:
+        return fam
+
+    _PERSOON_VELDEN = [
+        "voornaam", "familienaam", "geslacht", "geboortedatum",
+        "geboorteplaats", "geboorteland", "nationaliteit",
+        "burgerlijke_staat", "overlijdensdatum",
+        "adres_straat", "adres_nr", "adres_bus", "adres_postcode",
+        "adres_gemeente", "adres_provincie", "adres_gewest",
+    ]
+
+    rr_data = rr.copy()
+
+    bis_data = pd.DataFrame()
+    if not bis.empty and "bisnummer" in bis.columns:
+        bis_data = bis.rename(columns={"bisnummer": "rijksregisternummer"}).copy()
+
+    alle = pd.concat(
+        [df for df in [rr_data, bis_data] if not df.empty],
+        ignore_index=True,
+    )
+
+    aanwezig = ["rijksregisternummer"] + [v for v in _PERSOON_VELDEN if v in alle.columns]
+    return fam.merge(alle[aanwezig], on="rijksregisternummer", how="left")
 
 
 def _verrijk_families(df: pd.DataFrame) -> None:
     """Voeg berekende kolommen toe (in-place)."""
     cfg = lees_config()
     ref = pd.Timestamp(cfg["meta"]["creation_date"])
-    df["geboortedatum"] = pd.to_datetime(df["geboortedatum"], errors="coerce")
-    df["leeftijd"]      = ((ref - df["geboortedatum"]).dt.days // 365).clip(0, 120)
-    df["n_kinderen"]    = df["kinderen_rr"].apply(
+    if "geboortedatum" in df.columns:
+        df["geboortedatum"] = pd.to_datetime(df["geboortedatum"], errors="coerce")
+        df["leeftijd"]      = ((ref - df["geboortedatum"]).dt.days // 365).clip(0, 120)
+    df["n_kinderen"] = df["kinderen_rr"].apply(
         lambda x: len(x) if isinstance(x, list) else 0
     )
+
+
+@st.cache_data(show_spinner="Loopbaandata inlezen van schijf…")
+def load_carriere(dim_pad: str, rsvz_pad: str, rvw_pad: str,
+                  _d_mt: float, _r_mt: float, _w_mt: float) -> dict:
+    """Bouw opzoektabel {rrn: {dimona:[...], rsvz:[...], rvw:[...]}}."""
+    idx: dict = {}
+    for pad, sleutel in [(dim_pad, "dimona"), (rsvz_pad, "rsvz"), (rvw_pad, "rvw")]:
+        if not pad or not Path(pad).exists():
+            continue
+        with open(pad, encoding="utf-8") as f:
+            records = json.load(f)
+        for rec in records:
+            rrn = rec.get("rijksregisternummer", "")
+            if not rrn:
+                continue
+            if rrn not in idx:
+                idx[rrn] = {"dimona": [], "rsvz": [], "rvw": []}
+            idx[rrn][sleutel].append(rec)
+    return idx
+
+
+@st.cache_data(show_spinner="Families inlezen van schijf…")
+def load_families(fam_pad: str, rr_pad: str, bis_pad: str,
+                  _fam_mtime: float, _rr_mtime: float, _bis_mtime: float) -> pd.DataFrame:
+    fam = pd.read_json(fam_pad, convert_dates=False)
+    rr  = pd.read_json(rr_pad,  convert_dates=False)
+    bis = pd.read_json(bis_pad, convert_dates=False) if Path(bis_pad).exists() else pd.DataFrame()
+    enriched = _enrich_families(fam, rr, bis)
+    _verrijk_families(enriched)
+    return enriched
 
 
 def leeftijdsbanden(df: pd.DataFrame) -> pd.DataFrame:
@@ -515,7 +568,10 @@ with st.sidebar:
 # --------------------------------------------------------------------------- #
 RR_PATH  = SAVE_DIR / f"{prefix}_rijksregister.json"
 BIS_PATH = SAVE_DIR / f"{prefix}_bisregister.json"
-FAM_PATH = SAVE_DIR / f"{prefix}_families.json"
+FAM_PATH    = SAVE_DIR / f"{prefix}_families.json"
+DIMONA_PATH = SAVE_DIR / f"{prefix}_dimona.json"
+RSVZ_PATH   = SAVE_DIR / f"{prefix}_rsvz.json"
+RVW_PATH    = SAVE_DIR / f"{prefix}_rvw.json"
 
 if not (RR_PATH.exists() and BIS_PATH.exists()):
     st.error(
@@ -538,8 +594,24 @@ if not FAM_PATH.exists():
     fam = pd.DataFrame()
     fam_bron = "ontbreekt"
 else:
-    fam = load_families(str(FAM_PATH), FAM_PATH.stat().st_mtime)
+    fam = load_families(
+        str(FAM_PATH), str(RR_PATH), str(BIS_PATH),
+        FAM_PATH.stat().st_mtime, RR_PATH.stat().st_mtime, BIS_PATH.stat().st_mtime,
+    )
     fam_bron = "schijf"
+
+# Loopbaandata
+if DIMONA_PATH.exists() or RSVZ_PATH.exists():
+    carriere_idx = load_carriere(
+        str(DIMONA_PATH) if DIMONA_PATH.exists() else "",
+        str(RSVZ_PATH)   if RSVZ_PATH.exists()   else "",
+        str(RVW_PATH)    if RVW_PATH.exists()     else "",
+        DIMONA_PATH.stat().st_mtime if DIMONA_PATH.exists() else 0.0,
+        RSVZ_PATH.stat().st_mtime   if RSVZ_PATH.exists()   else 0.0,
+        RVW_PATH.stat().st_mtime    if RVW_PATH.exists()    else 0.0,
+    )
+else:
+    carriere_idx = {}
 
 rr_levend = rr[rr["overlijdensdatum"].isna()]
 
@@ -557,6 +629,8 @@ with st.sidebar:
     st.caption(f"Referentiedatum: **{cfg_sidebar['meta']['creation_date']}**")
     if fam_bron == "schijf":
         st.caption(f"Families: **{len(fam):,}** personen (💾)")
+    if carriere_idx:
+        st.caption(f"Loopbanen: **{len(carriere_idx):,}** personen (💾)")
 
 
 # --------------------------------------------------------------------------- #
@@ -1023,6 +1097,16 @@ with tab_kaart:
             ouders_f         = c11.selectbox("Ouders in systeem", ["(alle)", "Ja", "Nee"])
             heeft_partner_f  = c12.selectbox("Heeft partner", ["(alle)", "Ja", "Nee"])
 
+            if carriere_idx:
+                st.markdown("**Loopbaanfilters**")
+                lc1, lc2, lc3 = st.columns(3)
+                beroep_f  = lc1.text_input("Beroep (bevat)", placeholder="bijv. huisarts")
+                statuut_f = lc2.selectbox("Statuut (ooit)",
+                                          ["(alle)", "bediende", "arbeider", "ambtenaar", "zelfstandige", "werkloos"])
+                zz_f      = lc3.selectbox("Zelfstandige", ["(alle)", "Huidig", "Ooit", "Nooit"])
+            else:
+                beroep_f = ""; statuut_f = "(alle)"; zz_f = "(alle)"
+
             zoek_btn = st.form_submit_button("Zoeken", type="primary")
 
         # ── Filteren + opslaan in sessie-staat ───────────────────────────────
@@ -1060,6 +1144,41 @@ with tab_kaart:
                     res = res[res["partner_rr"].notna()]
                 else:
                     res = res[res["partner_rr"].isna()]
+
+            # Loopbaanfilters (post-filter op carriere_idx)
+            if carriere_idx and beroep_f.strip():
+                term = beroep_f.strip().lower()
+                match_rrn = {
+                    rrn for rrn, data in carriere_idx.items()
+                    if any(term in r.get("beroep", "").lower()
+                           for r in data.get("dimona", []) + data.get("rsvz", []))
+                }
+                res = res[res["_nummer"].isin(match_rrn)]
+
+            if carriere_idx and statuut_f != "(alle)":
+                if statuut_f == "werkloos":
+                    match_rrn = {rrn for rrn, d in carriere_idx.items() if d.get("rvw")}
+                elif statuut_f == "zelfstandige":
+                    match_rrn = {rrn for rrn, d in carriere_idx.items() if d.get("rsvz")}
+                else:
+                    match_rrn = {
+                        rrn for rrn, d in carriere_idx.items()
+                        if any(r.get("categorie") == statuut_f for r in d.get("dimona", []))
+                    }
+                res = res[res["_nummer"].isin(match_rrn)]
+
+            if carriere_idx and zz_f != "(alle)":
+                if zz_f in ("Huidig", "Ooit"):
+                    match_rrn = {rrn for rrn, d in carriere_idx.items() if d.get("rsvz")}
+                    if zz_f == "Huidig":
+                        match_rrn = {
+                            rrn for rrn in match_rrn
+                            if any(r.get("datum_stop") is None for r in carriere_idx[rrn]["rsvz"])
+                        }
+                    res = res[res["_nummer"].isin(match_rrn)]
+                else:  # Nooit
+                    geen_zz = {rrn for rrn, d in carriere_idx.items() if not d.get("rsvz")}
+                    res = res[res["_nummer"].isin(geen_zz)]
 
             st.session_state.zoek_res = res.reset_index(drop=True) if not res.empty else None
             if res.empty:
@@ -1157,6 +1276,75 @@ with tab_kaart:
                     {"": "Provincie/Gewest", "Waarde": f"{persoon.get('adres_provincie', '')} · {persoon.get('adres_gewest', '')}"},
                 ]
                 st.table(pd.DataFrame(adres_rijen).set_index(""))
+
+            # ── Loopbaan ─────────────────────────────────────────────────────
+            rrn_kaart = str(persoon.get("rijksregisternummer") or persoon.get("bisnummer") or "")
+            loopbaan  = carriere_idx.get(rrn_kaart, {})
+            if loopbaan:
+                st.divider()
+                st.subheader("Loopbaan")
+
+                dim  = loopbaan.get("dimona", [])
+                rsvz = loopbaan.get("rsvz",   [])
+                rvw  = loopbaan.get("rvw",    [])
+
+                kpi1, kpi2, kpi3 = st.columns(3)
+                kpi1.metric("Loondienst (jobs)", len([d for d in dim if d.get("type") != "S"]))
+                kpi2.metric("Zelfstandige (aansl.)", len(rsvz))
+                kpi3.metric("Werkloosheidsperioden", len(rvw))
+
+                if dim:
+                    student_jobs = [d for d in dim if d.get("type") == "S"]
+                    pro_jobs     = [d for d in dim if d.get("type") != "S"]
+                    if pro_jobs:
+                        st.markdown("**Loondienst (Dimona)**")
+                        dim_df = pd.DataFrame([{
+                            "Beroep":     d.get("beroep", ""),
+                            "Statuut":    d.get("categorie", "").capitalize(),
+                            "Werkgever":  d.get("naam_werkgever", ""),
+                            "NACE":       d.get("sector_nace", ""),
+                            "Van":        d.get("datum_in", ""),
+                            "Tot":        d.get("datum_uit") or "—",
+                            "Reden uit":  {"O": "Ontslag/einde contract",
+                                          "P": "Pensioen",
+                                          "OD": "Overlijden"}.get(d.get("reden_uit", ""), "—"),
+                        } for d in sorted(pro_jobs, key=lambda x: x.get("datum_in", ""))])
+                        st.dataframe(dim_df, use_container_width=True, hide_index=True)
+                    if student_jobs:
+                        with st.expander(f"Studentenjobs ({len(student_jobs)})"):
+                            sj_df = pd.DataFrame([{
+                                "Beroep":    d.get("beroep", ""),
+                                "Werkgever": d.get("naam_werkgever", ""),
+                                "Van":       d.get("datum_in", ""),
+                                "Tot":       d.get("datum_uit", ""),
+                            } for d in sorted(student_jobs, key=lambda x: x.get("datum_in", ""))])
+                            st.dataframe(sj_df, use_container_width=True, hide_index=True)
+
+                if rsvz:
+                    st.markdown("**Zelfstandige (RSVZ)**")
+                    rsvz_df = pd.DataFrame([{
+                        "Beroep":      r.get("beroep", ""),
+                        "Categorie":   {"H": "Hoofdberoep", "B": "Bijberoep"}.get(r.get("categorie", ""), r.get("categorie", "")),
+                        "KBO":         r.get("kbo_onderneming", ""),
+                        "NACE":        r.get("activiteit_nace", ""),
+                        "Van":         r.get("datum_start", ""),
+                        "Tot":         r.get("datum_stop") or "—",
+                        "Reden stop":  {"P": "Pensioen", "S": "Stopzetting", "OD": "Overlijden"}.get(r.get("reden_stop", ""), "—"),
+                    } for r in sorted(rsvz, key=lambda x: x.get("datum_start", ""))])
+                    st.dataframe(rsvz_df, use_container_width=True, hide_index=True)
+
+                if rvw:
+                    with st.expander(f"Werkloosheidsperioden ({len(rvw)})"):
+                        rvw_df = pd.DataFrame([{
+                            "Type":  {"VW": "Volledig werkloos", "TW": "Tijdelijk werkloos"}.get(r.get("type", ""), r.get("type", "")),
+                            "Van":   r.get("datum_begin", ""),
+                            "Tot":   r.get("datum_einde") or "—",
+                            "Code":  r.get("uitkering", ""),
+                        } for r in sorted(rvw, key=lambda x: x.get("datum_begin", ""))])
+                        st.dataframe(rvw_df, use_container_width=True, hide_index=True)
+            elif carriere_idx:
+                st.divider()
+                st.caption("Geen loopbaandata beschikbaar voor deze persoon.")
 
             # ── Stamboom ─────────────────────────────────────────────────────
             st.divider()

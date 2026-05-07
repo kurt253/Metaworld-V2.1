@@ -32,7 +32,10 @@ metaworldV2/
 └── Generated Data/
     ├── {prefix}_rijksregister.json
     ├── {prefix}_bisregister.json
-    └── {prefix}_families.json
+    ├── {prefix}_families.json
+    ├── {prefix}_dimona.json      # Dimona-aangiften (RSZ)
+    ├── {prefix}_rsvz.json        # RSVZ-aansluitingen (zelfstandigen)
+    └── {prefix}_rvw.json         # RVA-werkloosheidsperioden
 ```
 
 ---
@@ -60,13 +63,25 @@ metaworldV2/
 ```
 config.json
     │
-    ├─► generate_register.py  →  rijksregister DataFrame  ─┐
-    ├─► generate_register.py  →  bisregister DataFrame    ─┼─► JSON-bestanden (Generated Data/)
-    └─► generate_families.py  →  families list[dict]      ─┘
-                                                             │
-                                                             └─► demografie.py (Streamlit, read-only)
-                                                             └─► auth_service.py / data_service.py (Flask)
+    ├─► generate_register.py  →  rijksregister DataFrame  ──────────────────────────┐
+    ├─► generate_register.py  →  bisregister DataFrame    ──────────────────────────┤
+    │                                                                                │
+    └─► generate_families.py  →  muteert rr/bis in-place  ──────────────────────────┤
+                               (burgerlijke_staat, familienaam, adres)              │
+                               →  families list[dict] (slim: alleen relaties)  ─────┤
+                                                                                     │
+                                                             JSON-bestanden ◄────────┘
+                                                             (Generated Data/)
+                                                                │
+                                                                └─► demografie.py (Streamlit)
+                                                                    (joins families + registers)
+                                                                └─► auth_service.py / data_service.py
 ```
+
+**Enkelvoudige bron van waarheid:**
+- Alle persoonsdata leeft uitsluitend in de registers (`_rijksregister.json`, `_bisregister.json`)
+- `_families.json` bevat enkel relatie-velden: `rijksregisternummer, generatie, partner_rr, vader_rr, moeder_rr, kinderen_rr`
+- De Streamlit verrijkt families on-the-fly via een join met de registers
 
 ---
 
@@ -90,12 +105,34 @@ generate_bisregister(n=None, config_path=None) -> pd.DataFrame
 ### `generate_families.py`
 
 ```python
-generate_families(n_stamfamilies=None, n_stamsingles=None, seed=None, config_path=None) -> list[dict]
+generate_families(n_stamfamilies=None, n_stamsingles=None, seed=None, config_path=None,
+                  rr_df=None, bis_df=None) -> list[dict]
 # None → leest uit config.generation.counts.*  en  config.meta.seed
 # Genereert 4 generaties (gen 0–3), koppelt ouders/kinderen/partners
-# Kolommen: rijksregisternummer, voornaam, familienaam, geslacht, geboortedatum,
-#           nationaliteit, burgerlijke_staat, generatie, partner_rr, vader_rr,
-#           moeder_rr, kinderen_rr (list), overlijdensdatum, adres_*
+#
+# SCHRIJFT IN-PLACE terug naar rr_df / bis_df:
+#   burgerlijke_staat  – op basis van relatiestatus
+#   familienaam        – kinderen erven vadersnaam
+#   adres_*            – koppels en minderjarigen delen huishoudadres
+#
+# Geretourneerde dict per persoon (gesorteerd gen 0→3, dalende afstamming):
+#   rijksregisternummer, generatie, partner_rr, vader_rr, moeder_rr, kinderen_rr
+```
+
+### `generate_careers.py`
+
+```python
+generate_careers(rr_df=None, bis_df=None, seed=None, config_path=None)
+    -> (dimona_records, rsvz_records, rvw_records)
+
+# Genereert loopbanen voor alle personen in rr_df en bis_df.
+# 200 beroepen verdeeld over: bediende (50), arbeider (50), ambtenaar (50), zelfstandige (50)
+# Stadia: studentenjob (16+), professionele loopbaan (18+), pensioen (Belgische statistieken)
+#
+# dimona_records: Dimona-aangiften (RSZ) – type D/A/S, werkgever KBO, beroep, datum_in/uit
+# rsvz_records  : RSVZ-aansluitingen – beroep, KBO onderneming, categorie H/B, datum_start/stop
+# rvw_records   : RVA-perioden – type VW/TW, datum_begin/einde
+# Elke persoon kan in meerdere bestanden voorkomen (gemengde loopbaan).
 ```
 
 ### `generate_adressen.py`
@@ -116,8 +153,12 @@ Gebruik dit notebook om data aan te maken en te inspecteren:
 2. **Config tonen**: controleert wat er gegenereerd zal worden
 3. **Genereer rijksregister** via `generate_rijksregister()`
 4. **Genereer bisregister** via `generate_bisregister()`
-5. **Genereer families** via `generate_families()`
+5. **Genereer families** via `generate_families(rr_df=rr, bis_df=bis)`
+   (optioneel) **Genereer loopbanen** via `generate_careers(rr_df=rr, bis_df=bis)`
+   → produceert `dimona`, `rsvz`, `rvw` lijsten; sla op als `{PREFIX}_dimona/rsvz/rvw.json`
+   — muteert rr en bis in-place (burgerlijke_staat, familienaam, adres)
 6. **Opslaan** naar `Generated Data/{PREFIX}_*.json`
+   — sla rr en bis op ná families-generatie (bevatten nu de bijgewerkte waarden)
 7. **Rapport**: roept `rapporteer_bestanden(SAVE_DIR, PREFIX)` aan — toont aantallen,
    geslachtsverdeling, nationaliteiten, generaties, overledenen, etc.
 
